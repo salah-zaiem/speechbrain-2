@@ -1,0 +1,9 @@
+This file compiles the 
+
+TASK LibriSpeech ASR : 
+	LSTM
+	conformer
+	contextnet
+TASK IEMOCAP:
+	linear
+	ecapa_tdnn
