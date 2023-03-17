@@ -1,9 +1,13 @@
 This file compiles the 
 
-TASK LibriSpeech ASR : 
+TASK LibriSpeech: 
 	LSTM
 	conformer
 	contextnet
 TASK IEMOCAP:
 	linear
 	ecapa_tdnn
+TASK VoxCeleb1:
+	ecapa_tdnn
+	Xvectors
+

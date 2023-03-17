@@ -290,10 +290,6 @@ if __name__ == "__main__":
     enrol_dict = compute_embedding_loop(enrol_dataloader)
     test_dict = compute_embedding_loop(test_dataloader)
 
-    # Second run (normalization stats are more stable)
-#    enrol_dict = compute_embedding_loop(enrol_dataloader)
-#    test_dict = compute_embedding_loop(test_dataloader)
-
     if "score_norm" in params:
         train_dict = compute_embedding_loop(train_dataloader)
 

@@ -10,7 +10,7 @@ declare -a DownStreams=('BiLSTM' 'ecapa_tdnn')
 for i in "${!ConsideredTasks[@]}"; do
 	task=${ConsideredTasks[i]}
 	downstream=${DownStreams[i]}
-	python $task/$downstream/train.py --num_layers $num_layers --hub $hub --encoder_dim $encoder_dim --output_folder $output_folder/$task/$downstream
+	python $task/$downstream/train.py $task/$downstream/hparams/ssl.yaml --num_layers $num_layers --hub $hub --encoder_dim $encoder_dim --output_folder $output_folder/$task/$downstream
 done
 
 
