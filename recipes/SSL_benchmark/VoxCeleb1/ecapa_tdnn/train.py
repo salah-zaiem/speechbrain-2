@@ -11,13 +11,16 @@ Using your own hyperparameter file or one of the following:
 
 """
 import os
+from tqdm import tqdm
 import sys
+import logging
 import random
 import torch
 import torchaudio
 import speechbrain as sb
 from speechbrain.utils.data_utils import download_file
 from hyperpyyaml import load_hyperpyyaml
+from speechbrain.utils.metric_stats import EER, minDCF
 from speechbrain.utils.distributed import run_on_main
 from load_and_featurize import load_model, featurize
 def compute_embedding(wavs, wav_lens):
@@ -33,10 +36,9 @@ def compute_embedding(wavs, wav_lens):
         in the length (e.g., [0.8 0.6 1.0])
     """
     with torch.no_grad():
-
-        feats = featurize( hf_model, self.layers_weights, wavs.to(hparams["device"]), lens.to(hparams["device"]), hparams)
-        #feats = params["mean_var_norm"](feats, wav_lens)
-        embeddings = params["embedding_model"](feats, wav_lens)
+        wav_lens = wav_lens.to(speaker_brain.device)
+        feats = featurize( hf_model, speaker_brain.layers_weights, wavs.to(hparams["device"]), wav_lens, hparams)
+        embeddings = speaker_brain.modules.embedding_model(feats, wav_lens)
     return embeddings.squeeze(1)
 
 
@@ -48,7 +50,7 @@ def compute_embedding_loop(data_loader):
 
     with torch.no_grad():
         for batch in tqdm(data_loader, dynamic_ncols=True):
-            batch = batch.to(params["device"])
+            batch = batch.to(hparams["device"])
             seg_ids = batch.id
             wavs, lens = batch.sig
 
@@ -58,7 +60,7 @@ def compute_embedding_loop(data_loader):
                     found = True
             if not found:
                 continue
-            wavs, lens = wavs.to(params["device"]), lens.to(params["device"])
+            wavs, lens = wavs.to(hparams["device"]), lens.to(hparams["device"])
             emb = compute_embedding(wavs, lens).unsqueeze(1)
             for i, seg_id in enumerate(seg_ids):
                 embedding_dict[seg_id] = emb[i].detach().clone()
@@ -72,14 +74,14 @@ def get_verification_scores(veri_test):
     positive_scores = []
     negative_scores = []
 
-    save_file = os.path.join(params["output_folder"], "scores.txt")
+    save_file = os.path.join(hparams["output_folder"], "scores.txt")
     s_file = open(save_file, "w")
 
     # Cosine similarity initialization
     similarity = torch.nn.CosineSimilarity(dim=-1, eps=1e-6)
 
     # creating cohort for score normalization
-    if "score_norm" in params:
+    if "score_norm" in hparams:
         train_cohort = torch.stack(list(train_dict.values()))
 
     for i, line in enumerate(veri_test):
@@ -91,14 +93,14 @@ def get_verification_scores(veri_test):
         enrol = enrol_dict[enrol_id]
         test = test_dict[test_id]
 
-        if "score_norm" in params:
+        if "score_norm" in hparams:
             # Getting norm stats for enrol impostors
             enrol_rep = enrol.repeat(train_cohort.shape[0], 1, 1)
             score_e_c = similarity(enrol_rep, train_cohort)
 
-            if "cohort_size" in params:
+            if "cohort_size" in hparams:
                 score_e_c = torch.topk(
-                    score_e_c, k=params["cohort_size"], dim=0
+                    score_e_c, k=hparams["cohort_size"], dim=0
                 )[0]
 
             mean_e_c = torch.mean(score_e_c, dim=0)
@@ -108,9 +110,9 @@ def get_verification_scores(veri_test):
             test_rep = test.repeat(train_cohort.shape[0], 1, 1)
             score_t_c = similarity(test_rep, train_cohort)
 
-            if "cohort_size" in params:
+            if "cohort_size" in hparams:
                 score_t_c = torch.topk(
-                    score_t_c, k=params["cohort_size"], dim=0
+                    score_t_c, k=hparams["cohort_size"], dim=0
                 )[0]
 
             mean_t_c = torch.mean(score_t_c, dim=0)
@@ -120,12 +122,12 @@ def get_verification_scores(veri_test):
         score = similarity(enrol, test)[0]
 
         # Perform score normalization
-        if "score_norm" in params:
-            if params["score_norm"] == "z-norm":
+        if "score_norm" in hparams:
+            if hparams["score_norm"] == "z-norm":
                 score = (score - mean_e_c) / std_e_c
-            elif params["score_norm"] == "t-norm":
+            elif hparams["score_norm"] == "t-norm":
                 score = (score - mean_t_c) / std_t_c
-            elif params["score_norm"] == "s-norm":
+            elif hparams["score_norm"] == "s-norm":
                 score_e = (score - mean_e_c) / std_e_c
                 score_t = (score - mean_t_c) / std_t_c
                 score = 0.5 * (score_e + score_t)
@@ -368,6 +370,7 @@ def dataio_prep(hparams):
 
 if __name__ == "__main__":
 
+    logger = logging.getLogger(__name__)
     # This flag enables the inbuilt cudnn auto-tuner
     torch.backends.cudnn.benchmark = True
 
@@ -389,19 +392,18 @@ if __name__ == "__main__":
 
     # Dataset prep (parsing VoxCeleb and annotation into csv files)
     from voxceleb_prepare import prepare_voxceleb  # noqa
-    """
-    run_on_main(
-        prepare_voxceleb,
-        kwargs={
-            "data_folder": hparams["data_folder"],
-            "save_folder": hparams["save_folder"],
-            "verification_pairs_file": veri_file_path,
-            "splits": ["train", "dev"],
-            "split_ratio": [90, 10],
-            "seg_dur": hparams["sentence_len"],
-        },
+    prepare_voxceleb(
+        data_folder=hparams["data_folder"],
+        save_folder=hparams["save_folder"],
+        verification_pairs_file=veri_file_path,
+        splits=["train", "dev", "test"],
+        split_ratio=[90, 10],
+        seg_dur=hparams["sentence_len"],
+        source=params["voxceleb_source"]
+        if "voxceleb_source" in hparams
+        else None,
     )
-    """
+
     #Loading wav2vec2.0 
     if not hparams["pretrain"]:
         run_on_main(hparams["pretrainer"].collect_files)
@@ -459,7 +461,10 @@ if __name__ == "__main__":
 
 
     #Now preparing for test : 
-    train_dataloader, enrol_dataloader, test_dataloader = dataio_prep_verif(params)
+    hparams["device"] = speaker_brain.device
+
+    speaker_brain.modules.eval()
+    train_dataloader, enrol_dataloader, test_dataloader = dataio_prep_verif(hparams)
     # Computing  enrollment and test embeddings
     logger.info("Computing enroll/test embeddings...")
 
@@ -467,7 +472,7 @@ if __name__ == "__main__":
     enrol_dict = compute_embedding_loop(enrol_dataloader)
     test_dict = compute_embedding_loop(test_dataloader)
 
-    if "score_norm" in params:
+    if "score_norm" in hparams:
         train_dict = compute_embedding_loop(train_dataloader)
 
     # Compute the EER
@@ -486,8 +491,4 @@ if __name__ == "__main__":
         torch.tensor(positive_scores), torch.tensor(negative_scores)
     )
     # Testing
-    macs = clever_format([np.mean(all_macs)], "%.3f")
-    print(f" mean number of macs : {macs}")
-
-
     logger.info("minDCF=%f", min_dcf * 100)

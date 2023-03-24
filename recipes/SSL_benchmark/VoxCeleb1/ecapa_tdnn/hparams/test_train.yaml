@@ -4,7 +4,7 @@
 # Basic parameters
 seed: 1986
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
-output_folder: !ref /gpfswork/rech/nou/uzn19yk/downstream2/voxceleb/data2vec_base
+output_folder: !ref /gpfsscratch/rech/nou/uzn19yk/downstream2/voxceleb/data2vec_base
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
 weights_path: !ref <save_folder>/weights.ckpt
@@ -46,7 +46,6 @@ sentence_len: 3
 # Feature parameters
 
 encoder_dim: 768
-n_mels: 24
 left_frames: 0
 right_frames: 0
 deltas: False
@@ -59,12 +58,6 @@ dataloader_options:
     batch_size: !ref <batch_size>
     shuffle: !ref <shuffle>
 
-# Functions
-compute_features: !new:speechbrain.lobes.features.Fbank
-    n_mels: !ref <n_mels>
-    left_frames: !ref <left_frames>
-    right_frames: !ref <right_frames>
-    deltas: !ref <deltas>
 embedding_model: !new:speechbrain.lobes.models.ECAPA_TDNN.ECAPA_TDNN
     input_size: !ref <encoder_dim>
     channels: [512, 512, 512, 512, 1536]
@@ -81,72 +74,12 @@ classifier: !new:speechbrain.lobes.models.ECAPA_TDNN.Classifier
 epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
     limit: !ref <number_of_epochs>
 
-wav2vec2_hub: /gpfsstore/rech/nou/uzn19yk/data2vec-audio-base/
+hub: /gpfsstore/rech/nou/uzn19yk/data2vec-audio-base/
 
-
-augment_wavedrop: !new:speechbrain.lobes.augment.TimeDomainSpecAugment
-    sample_rate: !ref <sample_rate>
-    speeds: [100]
-
-augment_speed: !new:speechbrain.lobes.augment.TimeDomainSpecAugment
-    sample_rate: !ref <sample_rate>
-    speeds: [95, 100, 105]
-
-add_rev: !new:speechbrain.lobes.augment.EnvCorrupt
-    openrir_folder: !ref <rir_folder>
-    openrir_max_noise_len: 3.0  # seconds
-    reverb_prob: 1.0
-    noise_prob: 0.0
-    noise_snr_low: 0
-    noise_snr_high: 15
-    rir_scale_factor: 1.0
-
-add_noise: !new:speechbrain.lobes.augment.EnvCorrupt
-    openrir_folder: !ref <rir_folder>
-    openrir_max_noise_len: 3.0  # seconds
-    reverb_prob: 0.0
-    noise_prob: 1.0
-    noise_snr_low: 0
-    noise_snr_high: 15
-    rir_scale_factor: 1.0
-
-add_rev_noise: !new:speechbrain.lobes.augment.EnvCorrupt
-    openrir_folder: !ref <rir_folder>
-    openrir_max_noise_len: 3.0  # seconds
-    reverb_prob: 1.0
-    noise_prob: 1.0
-    noise_snr_low: 0
-    noise_snr_high: 15
-    rir_scale_factor: 1.0
-
-
-# Definition of the augmentation pipeline.
-# If concat_augment = False, the augmentation techniques are applied
-# in sequence. If concat_augment = True, all the augmented signals
-# are concatenated in a single big batch.
-augment_pipeline: [
-    !ref <augment_wavedrop>,
-    !ref <augment_speed>,
-    !ref <add_rev>,
-    !ref <add_noise>,
-    !ref <add_rev_noise>
-]
-concat_augment: True
-
-mean_var_norm: !new:speechbrain.processing.features.InputNormalization
-    norm_type: sentence
-    std_norm: False
 
 modules:
-    compute_features: !ref <compute_features>
-    augment_wavedrop: !ref <augment_wavedrop>
-    augment_speed: !ref <augment_speed>
-    add_rev: !ref <add_rev>
-    add_noise: !ref <add_noise>
-    add_rev_noise: !ref <add_rev_noise>
     embedding_model: !ref <embedding_model>
     classifier: !ref <classifier>
-    mean_var_norm: !ref <mean_var_norm>
 
 # Cost + optimization
 compute_error: !name:speechbrain.nnet.losses.classification_error
@@ -196,9 +129,7 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
         embedding_model: !ref <embedding_model>
         scheduler_wav2vec: !ref <lr_annealing_wav2vec>
         classifier: !ref <classifier>
-        normalizer: !ref <mean_var_norm>
         counter: !ref <epoch_counter>
-verification_file: /gpfsscratch/rech/nou/uzn19yk/voxceleb/veri_test2.txt
 
 train_data: !ref <save_folder>/train.csv
 enrol_data: !ref <save_folder>/enrol.csv
@@ -207,9 +138,6 @@ test_data: !ref <save_folder>/test.csv
 verif_batch_size: 2
 n_train_snts: 300000 # used for normalization stats
 
-# Feature parameters
-n_mels: !ref <encoder_dim>
-emb_dim: 512
 
 # Dataloader options
 train_dataloader_opts:
@@ -221,30 +149,9 @@ enrol_dataloader_opts:
 test_dataloader_opts:
     batch_size: !ref <batch_size>
 
-# Model params
-compute_features: !new:speechbrain.lobes.features.Fbank
-    n_mels: !ref <n_mels>
-
-mean_var_norm: !new:speechbrain.processing.features.InputNormalization
-    norm_type: sentence
-    std_norm: False
-
-embedding_model: !new:speechbrain.lobes.models.ECAPA_TDNN.ECAPA_TDNN
-    input_size: 768
-    channels: [512, 512, 512, 512, 1536]
-    kernel_sizes: [5, 3, 3, 3, 1]
-    dilations: [1, 2, 3, 4, 1]
-    groups: [1, 1, 1, 1, 1]
-    attention_channels: 64
-    lin_neurons: 512
 
 mean_var_norm_emb: !new:speechbrain.processing.features.InputNormalization
     norm_type: global
     std_norm: False
 
-pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
-    collect_in: !ref <pretrain_path>
-    loadables:
-        embedding_model: !ref <embedding_model>
-    paths:
-        embedding_model: !ref <pretrain_path>/embedding_model.ckpt
+
