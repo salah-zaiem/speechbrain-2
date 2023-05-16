@@ -21,7 +21,6 @@ from speechbrain.utils.distributed import run_on_main
 from hyperpyyaml import load_hyperpyyaml
 from pathlib import Path
 from transformers import AutoModel
-from speechbrain.lobes.models.SSLModel import SpeechSSLModel
 
 from pyctcdecode import build_ctcdecoder
 logger = logging.getLogger(__name__)
@@ -36,7 +35,7 @@ class ASR(sb.Brain):
         tokens_bos, _ = batch.tokens_bos
         wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
         # Forward pass
-        feats = ssl_model.featurize(wavs, wav_lens, self.hparams.layers_weights) 
+        feats = self.modules.weighted_ssl_model(wavs) 
         y = self.modules.enc(feats)
         y=y[0]
         # Compute outputs
@@ -170,17 +169,10 @@ class ASR(sb.Brain):
 
     def init_optimizers(self):
         "Initializes the weights optimizer and model optimizer"
-        self.weights_optimizer = self.hparams.weights_opt_class(
-            [self.hparams.layers_weights]
-        )
+        self.weights_optimizer = self.hparams.weights_opt_class([self.modules.weighted_ssl_model.weights])
         self.model_optimizer = self.hparams.model_opt_class(self.hparams.model.parameters())
         
         #Initializing the weights
-        if self.hparams.layers_weights.shape[0]==0:
-            zero_init = torch.cat([torch.zeros(hparams["num_layers"])])
-            self.hparams.layers_weights = torch.nn.Parameter(zero_init, requires_grad=True)
-            self.hparams.layers_weights.to(self.device)
-
         if self.checkpointer is not None:
             self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
             self.checkpointer.add_recoverable(
@@ -360,8 +352,6 @@ if __name__ == "__main__":
     )
 
     # Loading the SSL model
-    ssl_model = SpeechSSLModel(hparams)
-    ssl_model.model.to(asr_brain.device)
     # We dynamicaly add the tokenizer to our brain class.
     # NB: This tokenizer corresponds to the one used for the LM!!
     asr_brain.tokenizer = label_encoder

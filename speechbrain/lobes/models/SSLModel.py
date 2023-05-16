@@ -27,18 +27,16 @@ class SpeechSSLModel :
 class WeightedSSLModel(torch.nn.Module):
     def __init__(
         self,
-        params,
-        save_path,
+        hub,
         num_layers,
-        encoder_kwargs=None,
-        decoder_kwargs=None,
+        layernorm = False
     ):
         super().__init__()
-        self.encoder = AutoModel.from_pretrained(params["hub"], output_hidden_states = True)
-        self.num_layers = params["num_layers"]
+        self.encoder = AutoModel.from_pretrained(hub, output_hidden_states = True)
+        self.num_layers = num_layers
         zero_init = torch.cat([torch.zeros(self.num_layers)])
         self.weights = torch.nn.Parameter(zero_init, requires_grad=True)
-        self.layernorm = params["layernorm"]
+        self.layernorm = layernorm
 
     def forward(self, wav, wav_lens=None):
         feats= self.encoder(wavs)
