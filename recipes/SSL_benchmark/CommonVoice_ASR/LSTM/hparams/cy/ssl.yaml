@@ -1,45 +1,51 @@
 # ################################
-# Model: hubert-base + Contextnet
 # ################################
 
 # Seed needs to be set at top of yaml, before objects with parameters are made
 seed: 1986
 __set_seed: !apply:torch.manual_seed [!ref <seed>]
-output_folder: !ref /home/infres/ext-6343/venv_git_superb/The-audio-benchmark/speechbrain-develop/downstream/Buckeye/contextnet/results/hubert_base/<seed>
+output_folder: /gpfsscratch/rech/nou/uzn19yk/new_test_ssl_9h/commonvoice_ds1
 wer_file: !ref <output_folder>/wer.txt
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
 
+# Path for the SSL model (not necessrily W2V2) 
+hub: /gpfsstore/rech/nou/uzn19yk/distilhubert/
+#Path where the layer weights are stored 
 weights_path: !ref <save_folder>/weights.ckpt
 
-# URL for the biggest Fairseq english hubert-base model.
-hub: facebook/hubert-base-ls960
-num_layers: 13
 # Data files
+data_folder: /home/infres/ext-6343/venv_superb/The-audio-benchmark/speechbrain-develop/downstream/other_languages/data/cv-corpus-11.0-2022-09-21/cy  # e.g, /localscratch/cv-corpus-5.1-2020-06-22/fr
+train_tsv_file: !ref <data_folder>/train.tsv  # Standard CommonVoice .tsv files
+dev_tsv_file: !ref <data_folder>/dev.tsv  # Standard CommonVoice .tsv files
+test_tsv_file: !ref <data_folder>/test.tsv  # Standard CommonVoice .tsv files
+accented_letters: True
+language: cy # use 'it' for Italian, 'rw' for Kinyarwanda, 'en' for english
+train_csv: !ref <save_folder>/train.csv
+valid_csv: !ref <save_folder>/dev.csv
+test_csv: !ref <save_folder>/test.csv
+skip_prep: False # Skip data preparation
 
-csv_folder : /home/infres/ext-6343/venv_superb/The-audio-benchmark/speechbrain-develop/downstream/Buckeye/data_csvs
-ckpt_interval_minutes: 25 # save checkpoint every N min
-train_csv: !ref <csv_folder>/cleaned_train.csv
-valid_csv: !ref <csv_folder>/dev.csv
-test_csv: 
-        - !ref <csv_folder>/test.csv
+
+num_layers_ssl: 3  #Number of layers in the SSL model (should be 25 for large models and 13 for base or distilled)
+ssl_hub: /gpfsstore/rech/nou/uzn19yk/distilhubert/
+encoder_dim: 768
+
 # Training parameters
-number_of_epochs: 30
-
-data_folder: /home/infres/ext-6343/venv_superb/The-audio-benchmark/speechbrain-develop/downstream/Buckeye/data_csvs/wavs # e,g./path/to/LibriSpeech
-# data_folder_rirs: !ref <data_folder>
-lr: 0.0005
-lr_encoder: 0.01
+number_of_epochs: 2
+lr: 0.0002
+lr_weights: 0.01
 sorting: ascending
 auto_mix_prec: False
 sample_rate: 16000
-
+language_modelling: False
+ngram_lm_path: /gpfsstore/rech/nou/uzn19yk/4-gram.arpa
 
 # With data_parallel batch_size is split into N jobs
 # With DDP batch_size is multiplied by N jobs
 # Must be 3 per GPU to fit 32GB of VRAM
-batch_size: 3
-test_batch_size: 3
+batch_size: 4
+test_batch_size: 4
 
 # Dataloader options
 train_dataloader_opts:
@@ -54,15 +60,13 @@ test_dataloader_opts:
 # Model parameters
 activation: !name:torch.nn.Sigmoid
 dnn_layers: 1
-dnn_neurons: 1024
-freeze_encoder: True
+dnn_neurons: 768
+freeze_encoder : True
 
 # Outputs
-output_neurons: 35  # BPE size, index(blank/eos/bos) = 0
+output_neurons: 30  # BPE size, index(blank/eos/bos) = 0
 
-# Decoding parameters
 
-#
 # Functions and classes
 #
 epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
@@ -72,14 +76,20 @@ augmentation: !new:speechbrain.lobes.augment.TimeDomainSpecAugment
    sample_rate: !ref <sample_rate>
    speeds: [95, 100, 105]
 
-enc: !new:speechbrain.lobes.models.ContextNet.ContextNet
-   input_shape: [null, null, 768]
-   strides: [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1] #only unitary strides to keep the frame rate
+weighted_ssl_model: !new:speechbrain.lobes.models.SSLModel.WeightedSSLModel
+   hub: !ref <ssl_hub>
+   num_layers: !ref <num_layers_ssl>
+
+enc: !new:speechbrain.nnet.RNN.LSTM
+   input_shape:  [Null, Null, !ref <encoder_dim>]
+   num_layers: 2
+   bidirectional : True
+   dropout: 0.2
+   hidden_size: 1024
 
 ctc_lin: !new:speechbrain.nnet.linear.Linear
-   input_size: 640
+   input_size: 2048
    n_neurons: !ref <output_neurons>
-
 
 log_softmax: !new:speechbrain.nnet.activations.Softmax
    apply_log: True
@@ -90,16 +100,16 @@ ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
 modules:
    enc: !ref <enc>
    ctc_lin: !ref <ctc_lin>
+   weighted_ssl_model: !ref <weighted_ssl_model>
 
 model: !new:torch.nn.ModuleList
    - [!ref <enc>, !ref <ctc_lin>]
 
-model_opt_class: !name:torch.optim.AdamW
+model_opt_class: !name:torch.optim.Adam
    lr: !ref <lr>
 
-
-encoder_opt_class: !name:torch.optim.AdamW
-   lr: !ref <lr_encoder>
+weights_opt_class: !name:torch.optim.Adam
+   lr: !ref <lr_weights>
 
 lr_annealing_model: !new:speechbrain.nnet.schedulers.NewBobScheduler
    initial_value: !ref <lr>
@@ -107,8 +117,8 @@ lr_annealing_model: !new:speechbrain.nnet.schedulers.NewBobScheduler
    annealing_factor: 0.8
    patient: 0
 
-lr_annealing_encoder: !new:speechbrain.nnet.schedulers.NewBobScheduler
-   initial_value: !ref <lr_encoder>
+lr_annealing_weights: !new:speechbrain.nnet.schedulers.NewBobScheduler
+   initial_value: !ref <lr_weights>
    improvement_threshold: 0.0025
    annealing_factor: 0.9
    patient: 0
@@ -119,14 +129,14 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
    checkpoints_dir: !ref <save_folder>
    recoverables:
       model: !ref <model>
+      ssl_model: !ref <weighted_ssl_model>
       scheduler_model: !ref <lr_annealing_model>
-      scheduler_encoder: !ref <lr_annealing_encoder>
+      scheduler_encoder : !ref <lr_annealing_weights>
       counter: !ref <epoch_counter>
       tokenizer: !ref <label_encoder>
 
 blank_index: 0
-bos_index: 1
-eos_index: 2
+unk_index: 1
 
 
 train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger

@@ -32,12 +32,11 @@ class ASR(sb.Brain):
         """Forward computations from the waveform batches to the output probabilities."""
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
-        tokens_bos, _ = batch.tokens_bos
         wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
         # Forward pass
         feats = self.modules.weighted_ssl_model(wavs) 
-        y = self.modules.enc(feats)
-        y=y[0]
+        y = self.modules.enc(feats) 
+        y=y[0] # As it is an RNN output
         # Compute outputs
         p_tokens = None
         logits = self.modules.ctc_lin(y)
@@ -52,19 +51,8 @@ class ASR(sb.Brain):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
         p_ctc, wav_lens, predicted_tokens = predictions
-
         ids = batch.id
-        tokens_eos, tokens_eos_lens = batch.tokens_eos
         tokens, tokens_lens = batch.tokens
-
-        if hasattr(self.modules, "env_corrupt") and stage == sb.Stage.TRAIN:
-            tokens_eos = torch.cat([tokens_eos, tokens_eos], dim=0)
-            tokens_eos_lens = torch.cat(
-                [tokens_eos_lens, tokens_eos_lens], dim=0
-            )
-            tokens = torch.cat([tokens, tokens], dim=0)
-            tokens_lens = torch.cat([tokens_lens, tokens_lens], dim=0)
-
         loss_ctc = self.hparams.ctc_cost(p_ctc, tokens, wav_lens, tokens_lens)
         loss = loss_ctc
 
@@ -171,15 +159,12 @@ class ASR(sb.Brain):
         "Initializes the weights optimizer and model optimizer"
         self.weights_optimizer = self.hparams.weights_opt_class([self.modules.weighted_ssl_model.weights])
         self.model_optimizer = self.hparams.model_opt_class(self.hparams.model.parameters())
-        
         #Initializing the weights
         if self.checkpointer is not None:
             self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
             self.checkpointer.add_recoverable(
                 "weights_opt", self.weights_optimizer
             )
-
-
 
 def dataio_prepare(hparams):
     """This function prepares the datasets to be used in the brain class.
@@ -242,7 +227,7 @@ def dataio_prepare(hparams):
     # 3. Define text pipeline:
     @sb.utils.data_pipeline.takes("wrd")
     @sb.utils.data_pipeline.provides(
-        "wrd", "char_list", "tokens_list", "tokens_bos", "tokens_eos", "tokens"
+        "wrd", "char_list", "tokens_list", "tokens"
     )
     def text_pipeline(wrd):
         yield wrd
@@ -250,10 +235,6 @@ def dataio_prepare(hparams):
         yield char_list
         tokens_list = label_encoder.encode_sequence(char_list)
         yield tokens_list
-        tokens_bos = torch.LongTensor([hparams["bos_index"]] + (tokens_list))
-        yield tokens_bos
-        tokens_eos = torch.LongTensor(tokens_list + [hparams["eos_index"]])
-        yield tokens_eos
         tokens = torch.LongTensor(tokens_list)
         yield tokens
 
@@ -261,9 +242,8 @@ def dataio_prepare(hparams):
 
     lab_enc_file = os.path.join(hparams["save_folder"], "label_encoder.txt")
     special_labels = {
-        "bos_label": hparams["bos_index"],
-        "eos_label": hparams["eos_index"],
         "blank_label": hparams["blank_index"],
+        "unk_label": hparams["unk_index"],
     }
     label_encoder.load_or_create(
         path=lab_enc_file,
@@ -276,7 +256,7 @@ def dataio_prepare(hparams):
     # 4. Set output:
     sb.dataio.dataset.set_output_keys(
         datasets,
-        ["id", "sig", "wrd", "char_list", "tokens_bos", "tokens_eos", "tokens"],
+        ["id", "sig", "wrd", "char_list",  "tokens"],
     )
     return train_data, valid_data, test_datasets, label_encoder
 

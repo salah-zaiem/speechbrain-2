@@ -39,7 +39,7 @@ class WeightedSSLModel(torch.nn.Module):
         self.layernorm = layernorm
 
     def forward(self, wav, wav_lens=None):
-        feats= self.encoder(wavs)
+        feats= self.encoder(wav)
         hidden_states= torch.stack(feats.hidden_states, dim=0).detach()
         #First dimension should be equal to the number of layers in the hparams
         assert self.num_layers == hidden_states.shape[0], "Num layers not equal to num hidden states" 

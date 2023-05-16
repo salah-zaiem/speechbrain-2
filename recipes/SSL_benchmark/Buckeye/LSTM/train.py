@@ -22,8 +22,7 @@ from hyperpyyaml import load_hyperpyyaml
 from pathlib import Path
 from transformers import AutoModel
 
-os.environ["CUDA_VISIBLE_DEVICES"] ="2"
-
+from pyctcdecode import build_ctcdecoder
 logger = logging.getLogger(__name__)
 
 
@@ -33,19 +32,11 @@ class ASR(sb.Brain):
         """Forward computations from the waveform batches to the output probabilities."""
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
-        tokens_bos, _ = batch.tokens_bos
         wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
         # Forward pass
-        new_feats= hf_model(wavs)
-        x= new_feats.hidden_states
-        x= torch.stack(x, dim=0).detach()
-        #print(x.shape) #First dimension should be equal to the number of layers in the hparams
-        norm_weights = torch.nn.functional.softmax(self.layers_weights, dim=-1)
-        layer_0 = x[0] * norm_weights[0]
-        for i in range(1, len(x)): 
-            layer_0 += x[i] * norm_weights[i]
-        y = self.modules.enc(layer_0)
-        
+        feats = self.modules.weighted_ssl_model(wavs) 
+        y = self.modules.enc(feats) 
+        y=y[0] # As it is an RNN output
         # Compute outputs
         p_tokens = None
         logits = self.modules.ctc_lin(y)
@@ -60,23 +51,12 @@ class ASR(sb.Brain):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
         p_ctc, wav_lens, predicted_tokens = predictions
-
         ids = batch.id
-        tokens_eos, tokens_eos_lens = batch.tokens_eos
         tokens, tokens_lens = batch.tokens
-
-        if hasattr(self.modules, "env_corrupt") and stage == sb.Stage.TRAIN:
-            tokens_eos = torch.cat([tokens_eos, tokens_eos], dim=0)
-            tokens_eos_lens = torch.cat(
-                [tokens_eos_lens, tokens_eos_lens], dim=0
-            )
-            tokens = torch.cat([tokens, tokens], dim=0)
-            tokens_lens = torch.cat([tokens_lens, tokens_lens], dim=0)
-
         loss_ctc = self.hparams.ctc_cost(p_ctc, tokens, wav_lens, tokens_lens)
         loss = loss_ctc
 
-        if stage != sb.Stage.TRAIN:
+        if stage == sb.Stage.VALID:
             # Decode token terms to words
             predicted_words = [
                 "".join(self.tokenizer.decode_ndim(utt_seq)).split(" ")
@@ -85,8 +65,25 @@ class ASR(sb.Brain):
             target_words = [wrd.split(" ") for wrd in batch.wrd]
             self.wer_metric.append(ids, predicted_words, target_words)
             self.cer_metric.append(ids, predicted_words, target_words)
+        
+        elif stage == sb.Stage.TEST : 
+            if self.hparams.language_modelling:
+                predicted_words = []
+                for logs in p_ctc:
+                    text = decoder.decode(logs.detach().cpu().numpy())
+                    predicted_words.append(text.split(" "))
+            else:
+                predicted_words = [
+                    "".join(self.tokenizer.decode_ndim(utt_seq)).split(" ")
+                    for utt_seq in predicted_tokens
+                ]
+
+            target_words = [wrd.split(" ") for wrd in batch.wrd]
+            self.wer_metric.append(ids, predicted_words, target_words)
+            self.cer_metric.append(ids, predicted_words, target_words)
 
         return loss
+
 
     def fit_batch(self, batch):
         """Train the parameters given a single batch in input"""
@@ -132,7 +129,6 @@ class ASR(sb.Brain):
             old_lr_weights, new_lr_weights= self.hparams.lr_annealing_weights(
                 stage_stats["loss"]
             )
-            torch.save(self.layers_weights, self.hparams.weights_path)
             sb.nnet.schedulers.update_learning_rate(
                 self.model_optimizer, new_lr_model
             )
@@ -161,19 +157,14 @@ class ASR(sb.Brain):
 
     def init_optimizers(self):
         "Initializes the weights optimizer and model optimizer"
-        print(self.layers_weights)
-        self.weights_optimizer = self.hparams.weights_opt_class(
-            [self.layers_weights]
-        )
+        self.weights_optimizer = self.hparams.weights_opt_class([self.modules.weighted_ssl_model.weights])
         self.model_optimizer = self.hparams.model_opt_class(self.hparams.model.parameters())
-
+        #Initializing the weights
         if self.checkpointer is not None:
             self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
             self.checkpointer.add_recoverable(
                 "weights_opt", self.weights_optimizer
             )
-
-
 
 def dataio_prepare(hparams):
     """This function prepares the datasets to be used in the brain class.
@@ -224,19 +215,22 @@ def dataio_prepare(hparams):
     datasets = [train_data, valid_data] + [i for k, i in test_datasets.items()]
 
     # 2. Define audio pipeline:
-    @sb.utils.data_pipeline.takes("wav")
+    @sb.utils.data_pipeline.takes("wav", "start_seg", "end_seg")
     @sb.utils.data_pipeline.provides("sig")
-    def audio_pipeline(wav):
-        sig = sb.dataio.dataio.read_audio(wav)
+    def audio_pipeline(wav, start_seg, end_seg):
+        start = int(float(start_seg) * hparams["sample_rate"])
+        stop = int(float(end_seg) * hparams["sample_rate"])
+        speech_segment = {"file": wav, "start": start, "stop": stop}
+        sig = sb.dataio.dataio.read_audio(speech_segment)
         return sig
-
     sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
+ 
     label_encoder = sb.dataio.encoder.CTCTextEncoder()
 
     # 3. Define text pipeline:
     @sb.utils.data_pipeline.takes("wrd")
     @sb.utils.data_pipeline.provides(
-        "wrd", "char_list", "tokens_list", "tokens_bos", "tokens_eos", "tokens"
+        "wrd", "char_list", "tokens_list", "tokens"
     )
     def text_pipeline(wrd):
         yield wrd
@@ -244,10 +238,6 @@ def dataio_prepare(hparams):
         yield char_list
         tokens_list = label_encoder.encode_sequence(char_list)
         yield tokens_list
-        tokens_bos = torch.LongTensor([hparams["bos_index"]] + (tokens_list))
-        yield tokens_bos
-        tokens_eos = torch.LongTensor(tokens_list + [hparams["eos_index"]])
-        yield tokens_eos
         tokens = torch.LongTensor(tokens_list)
         yield tokens
 
@@ -255,9 +245,8 @@ def dataio_prepare(hparams):
 
     lab_enc_file = os.path.join(hparams["save_folder"], "label_encoder.txt")
     special_labels = {
-        "bos_label": hparams["bos_index"],
-        "eos_label": hparams["eos_index"],
         "blank_label": hparams["blank_index"],
+        "unk_label": hparams["unk_index"],
     }
     label_encoder.load_or_create(
         path=lab_enc_file,
@@ -270,7 +259,7 @@ def dataio_prepare(hparams):
     # 4. Set output:
     sb.dataio.dataset.set_output_keys(
         datasets,
-        ["id", "sig", "wrd", "char_list", "tokens_bos", "tokens_eos", "tokens"],
+        ["id", "sig", "wrd", "char_list",  "tokens"],
     )
     return train_data, valid_data, test_datasets, label_encoder
 
@@ -294,35 +283,28 @@ if __name__ == "__main__":
         overrides=overrides,
     )
     
-    # Loading the SSL model from huggingface 
-    # Important point here, "output_hidden_states: true " should be added in the config.json file 
-    #hf_model = AutoModelForPreTraining.from_pretrained(hparams["hub"])
-    hf_model = AutoModel.from_pretrained(hparams["hub"],output_hidden_states=True)
-    hf_model.eval()
-    # Dataset prep (parsing Librispeech)
-    from librispeech_prepare import prepare_librispeech  # noqa
-
-    # multi-gpu (ddp) save data preparation
-    """
-    run_on_main(
-        prepare_librispeech,
-        kwargs={
-            "data_folder": hparams["data_folder"],
-            "tr_splits": hparams["train_splits"],
-            "dev_splits": hparams["dev_splits"],
-            "te_splits": hparams["test_splits"],
-            "save_folder": hparams["output_folder"],
-            "merge_lst": hparams["train_splits"],
-            "merge_name": "train.csv",
-            "skip_prep": hparams["skip_prep"],
-        },
-    )
-    """
-
     # here we create the datasets objects as well as tokenization and encoding
     train_data, valid_data, test_datasets, label_encoder = dataio_prepare(
         hparams
     )
+    # Loading the labels for the LM decoding and the CTC decoder
+    if "language_modelling" in hparams:
+        if hparams["language_modelling"]:
+            ind2lab = label_encoder.ind2lab
+            labels = [ind2lab[x] for x in range(len(ind2lab))]
+            labels = [""] + labels[
+                1:
+            ]  # Replace the <blank> token with a blank character, needed for PyCTCdecode
+            decoder = build_ctcdecoder(
+                labels,
+                kenlm_model_path=hparams[
+                    "ngram_lm_path"
+                ],  # either .arpa or .bin file
+                alpha=0.5,  # tuned on a val set
+                beta=1.0,  # tuned on a val set
+            )
+    else:
+        hparams["language_modelling"] = False
 
     # Trainer initialization
     asr_brain = ASR(
@@ -332,19 +314,10 @@ if __name__ == "__main__":
         checkpointer=hparams["checkpointer"],
     )
 
-    hf_model.to(asr_brain.device)
+    # Loading the SSL model
     # We dynamicaly add the tokenizer to our brain class.
     # NB: This tokenizer corresponds to the one used for the LM!!
     asr_brain.tokenizer = label_encoder
-    if not os.path.exists(hparams["weights_path"]): 
-        #Zero initializiation like in S3PRL, not sure if it is the best choice, TODO TODO test torch.rand !   
-        end_init = torch.cat([torch.zeros(hparams["num_layers"])])
-    else : 
-        end_init = torch.load(hparams["weights_path"])
-        print("loaded weights")
-    asr_brain.layers_weights = torch.nn.Parameter(end_init, requires_grad=True)
-    torch.save(asr_brain.layers_weights, hparams["weights_path"])
-    asr_brain.layers_weights.to(asr_brain.device)
     # Training
     asr_brain.fit(
         asr_brain.hparams.epoch_counter,

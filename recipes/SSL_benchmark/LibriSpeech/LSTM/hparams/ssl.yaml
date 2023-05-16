@@ -9,7 +9,7 @@ wer_file: !ref <output_folder>/wer.txt
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
 
-# Path for the SSL model ( not necessrily W2V2 ) 
+# Path for the SSL model (not necessrily W2V2) 
 hub: /gpfsstore/rech/nou/uzn19yk/distilhubert/
 #Path where the layer weights are stored 
 weights_path: !ref <save_folder>/weights.ckpt
@@ -32,6 +32,7 @@ test_csv:
 
 num_layers_ssl: 3  #Number of layers in the SSL model (should be 25 for large models and 13 for base or distilled)
 ssl_hub: /gpfsstore/rech/nou/uzn19yk/distilhubert/
+encoder_dim: 768
 
 # Training parameters
 number_of_epochs: 2
@@ -66,11 +67,9 @@ dnn_neurons: 768
 freeze_encoder : True
 
 # Outputs
-output_neurons: 31  # BPE size, index(blank/eos/bos) = 0
+output_neurons: 30  # BPE size, index(blank/eos/bos) = 0
 
-# Decoding parameters
 
-#
 # Functions and classes
 #
 epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
@@ -80,18 +79,12 @@ augmentation: !new:speechbrain.lobes.augment.TimeDomainSpecAugment
    sample_rate: !ref <sample_rate>
    speeds: [95, 100, 105]
 
-stacker: !new:speechbrain.lobes.models.VanillaNN.VanillaNN
-   input_shape: [null, null,null, 25]
-   activation: !ref <activation>
-   dnn_blocks: 1
-   dnn_neurons: 1
-
 weighted_ssl_model: !new:speechbrain.lobes.models.SSLModel.WeightedSSLModel
    hub: !ref <ssl_hub>
    num_layers: !ref <num_layers_ssl>
 
 enc: !new:speechbrain.nnet.RNN.LSTM
-   input_shape: [Null, Null, 768]
+   input_shape:  [Null, Null, !ref <encoder_dim>]
    num_layers: 2
    bidirectional : True
    dropout: 0.2
@@ -108,13 +101,12 @@ ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
    blank_index: !ref <blank_index>
 
 modules:
-   stacker: !ref <stacker>
    enc: !ref <enc>
    ctc_lin: !ref <ctc_lin>
    weighted_ssl_model: !ref <weighted_ssl_model>
 
 model: !new:torch.nn.ModuleList
-   - [!ref <enc>, !ref <ctc_lin>, !ref <stacker>]
+   - [!ref <enc>, !ref <ctc_lin>]
 
 model_opt_class: !name:torch.optim.Adam
    lr: !ref <lr>
@@ -135,9 +127,7 @@ lr_annealing_weights: !new:speechbrain.nnet.schedulers.NewBobScheduler
    patient: 0
 
 label_encoder: !new:speechbrain.dataio.encoder.CTCTextEncoder
-layers_weights: !new:torch.nn.Parameter
-   data: Null
-   requires_grad: True
+
 checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
    checkpoints_dir: !ref <save_folder>
    recoverables:
@@ -147,11 +137,9 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
       scheduler_encoder : !ref <lr_annealing_weights>
       counter: !ref <epoch_counter>
       tokenizer: !ref <label_encoder>
-      layers_weights: !ref <layers_weights>
 
 blank_index: 0
-bos_index: 1
-eos_index: 2
+unk_index: 1
 
 
 train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
