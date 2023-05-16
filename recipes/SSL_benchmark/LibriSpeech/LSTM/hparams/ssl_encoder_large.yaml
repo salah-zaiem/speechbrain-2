@@ -24,9 +24,9 @@ dev_splits: ["dev-clean"]
 test_splits: ["test-clean", "test-other"]
 skip_prep: False
 ckpt_interval_minutes: 25 # save checkpoint every N min
-csv_folder: /home/infres/ext-6343/venv_superb/The-audio-benchmark/speechbrain-develop/downstream/LibriSpeechASR/data_csv
-train_csv: !ref <csv_folder>/train-clean-100.csv
-valid_csv: !ref <csv_folder>/dev-clean.csv
+csv_folder: /gpfsstore/rech/nou/uzn19yk/speechbrain/recipes/LibriSpeech/CTC/results/titouan_checkpoint/1986/
+train_csv: !ref <csv_folder>/train_dummy.csv
+valid_csv: !ref <csv_folder>/train_dummy.csv
 test_csv:
    - !ref <csv_folder>/test-clean.csv
    - !ref <csv_folder>/test-other.csv
@@ -34,7 +34,7 @@ test_csv:
 num_layers: 25 #Number of layers in the SSL model (should be 25 for large models and 13 for base or distilled)
 
 # Training parameters
-number_of_epochs: 30
+number_of_epochs: 5
 lr: 0.0002
 lr_weights: 0.01
 sorting: ascending

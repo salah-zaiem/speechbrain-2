@@ -21,9 +21,9 @@ from speechbrain.utils.distributed import run_on_main
 from hyperpyyaml import load_hyperpyyaml
 from pathlib import Path
 from transformers import AutoModel
+from speechbrain.lobes.models.SSLModel import SpeechSSLModel
 
-os.environ["CUDA_VISIBLE_DEVICES"] ="1"
-
+from pyctcdecode import build_ctcdecoder
 logger = logging.getLogger(__name__)
 
 
@@ -36,7 +36,7 @@ class ASR(sb.Brain):
         tokens_bos, _ = batch.tokens_bos
         wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
         # Forward pass
-        feats = featurize(ssl_model, self.layers_weights, wavs, wav_lens, hparams) 
+        feats = ssl_model.featurize(wavs, wav_lens, self.hparams.layers_weights) 
         y = self.modules.enc(feats)
         y=y[0]
         # Compute outputs
@@ -69,7 +69,7 @@ class ASR(sb.Brain):
         loss_ctc = self.hparams.ctc_cost(p_ctc, tokens, wav_lens, tokens_lens)
         loss = loss_ctc
 
-        if stage != sb.Stage.TRAIN:
+        if stage == sb.Stage.VALID:
             # Decode token terms to words
             predicted_words = [
                 "".join(self.tokenizer.decode_ndim(utt_seq)).split(" ")
@@ -78,8 +78,25 @@ class ASR(sb.Brain):
             target_words = [wrd.split(" ") for wrd in batch.wrd]
             self.wer_metric.append(ids, predicted_words, target_words)
             self.cer_metric.append(ids, predicted_words, target_words)
+        
+        elif stage == sb.Stage.TEST : 
+            if self.hparams.language_modelling:
+                predicted_words = []
+                for logs in p_ctc:
+                    text = decoder.decode(logs.detach().cpu().numpy())
+                    predicted_words.append(text.split(" "))
+            else:
+                predicted_words = [
+                    "".join(self.tokenizer.decode_ndim(utt_seq)).split(" ")
+                    for utt_seq in predicted_tokens
+                ]
+
+            target_words = [wrd.split(" ") for wrd in batch.wrd]
+            self.wer_metric.append(ids, predicted_words, target_words)
+            self.cer_metric.append(ids, predicted_words, target_words)
 
         return loss
+
 
     def fit_batch(self, batch):
         """Train the parameters given a single batch in input"""
@@ -125,7 +142,6 @@ class ASR(sb.Brain):
             old_lr_weights, new_lr_weights= self.hparams.lr_annealing_weights(
                 stage_stats["loss"]
             )
-            torch.save(self.layers_weights, self.hparams.weights_path)
             sb.nnet.schedulers.update_learning_rate(
                 self.model_optimizer, new_lr_model
             )
@@ -154,11 +170,16 @@ class ASR(sb.Brain):
 
     def init_optimizers(self):
         "Initializes the weights optimizer and model optimizer"
-        print(self.layers_weights)
         self.weights_optimizer = self.hparams.weights_opt_class(
-            [self.layers_weights]
+            [self.hparams.layers_weights]
         )
         self.model_optimizer = self.hparams.model_opt_class(self.hparams.model.parameters())
+        
+        #Initializing the weights
+        if self.hparams.layers_weights.shape[0]==0:
+            zero_init = torch.cat([torch.zeros(hparams["num_layers"])])
+            self.hparams.layers_weights = torch.nn.Parameter(zero_init, requires_grad=True)
+            self.hparams.layers_weights.to(self.device)
 
         if self.checkpointer is not None:
             self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
@@ -311,6 +332,24 @@ if __name__ == "__main__":
     train_data, valid_data, test_datasets, label_encoder = dataio_prepare(
         hparams
     )
+    # Loading the labels for the LM decoding and the CTC decoder
+    if "language_modelling" in hparams:
+        if hparams["language_modelling"]:
+            ind2lab = label_encoder.ind2lab
+            labels = [ind2lab[x] for x in range(len(ind2lab))]
+            labels = [""] + labels[
+                1:
+            ]  # Replace the <blank> token with a blank character, needed for PyCTCdecode
+            decoder = build_ctcdecoder(
+                labels,
+                kenlm_model_path=hparams[
+                    "ngram_lm_path"
+                ],  # either .arpa or .bin file
+                alpha=0.5,  # tuned on a val set
+                beta=1.0,  # tuned on a val set
+            )
+    else:
+        hparams["language_modelling"] = False
 
     # Trainer initialization
     asr_brain = ASR(
@@ -321,19 +360,11 @@ if __name__ == "__main__":
     )
 
     # Loading the SSL model
-    ssl_model = load_model(hparams)
-    ssl_model.to(asr_brain.device)
+    ssl_model = SpeechSSLModel(hparams)
+    ssl_model.model.to(asr_brain.device)
     # We dynamicaly add the tokenizer to our brain class.
     # NB: This tokenizer corresponds to the one used for the LM!!
     asr_brain.tokenizer = label_encoder
-    if not os.path.exists(hparams["weights_path"]): 
-        end_init = torch.cat([torch.zeros(hparams["num_layers"])])
-    else : 
-        end_init = torch.load(hparams["weights_path"])
-        print("loaded weights")
-    asr_brain.layers_weights = torch.nn.Parameter(end_init, requires_grad=True)
-    torch.save(asr_brain.layers_weights, hparams["weights_path"])
-    asr_brain.layers_weights.to(asr_brain.device)
     # Training
     asr_brain.fit(
         asr_brain.hparams.epoch_counter,
