@@ -21,11 +21,10 @@ from speechbrain.utils.distributed import run_on_main
 from hyperpyyaml import load_hyperpyyaml
 from pathlib import Path
 from transformers import AutoModel
-import torchaudio
+
 from pyctcdecode import build_ctcdecoder
 logger = logging.getLogger(__name__)
-from speechbrain.tokenizers.SentencePiece import SentencePiece
-from speechbrain.utils.data_utils import undo_padding
+
 
 # Define training procedure
 class ASR(sb.Brain):
@@ -57,16 +56,32 @@ class ASR(sb.Brain):
         loss_ctc = self.hparams.ctc_cost(p_ctc, tokens, wav_lens, tokens_lens)
         loss = loss_ctc
 
-        if stage != sb.Stage.TRAIN:
+        if stage == sb.Stage.VALID:
             # Decode token terms to words
-            predicted_words = self.tokenizer(predicted_tokens, task="decode_from_list")
-
-            # Convert indices to words
-            target_words = undo_padding(tokens, tokens_lens)
-            target_words = self.tokenizer(target_words, task="decode_from_list")
-
+            predicted_words = [
+                "".join(self.tokenizer.decode_ndim(utt_seq)).split(" ")
+                for utt_seq in predicted_tokens
+            ]
+            target_words = [wrd.split(" ") for wrd in batch.wrd]
             self.wer_metric.append(ids, predicted_words, target_words)
             self.cer_metric.append(ids, predicted_words, target_words)
+        
+        elif stage == sb.Stage.TEST : 
+            if self.hparams.language_modelling:
+                predicted_words = []
+                for logs in p_ctc:
+                    text = decoder.decode(logs.detach().cpu().numpy())
+                    predicted_words.append(text.split(" "))
+            else:
+                predicted_words = [
+                    "".join(self.tokenizer.decode_ndim(utt_seq)).split(" ")
+                    for utt_seq in predicted_tokens
+                ]
+
+            target_words = [wrd.split(" ") for wrd in batch.wrd]
+            self.wer_metric.append(ids, predicted_words, target_words)
+            self.cer_metric.append(ids, predicted_words, target_words)
+
         return loss
 
 
@@ -78,6 +93,7 @@ class ASR(sb.Brain):
         if self.check_gradients(loss):
             self.model_optimizer.step()
             self.weights_optimizer.step()
+
         self.model_optimizer.zero_grad()
         self.weights_optimizer.zero_grad()
         return loss.detach()
@@ -119,6 +135,7 @@ class ASR(sb.Brain):
             sb.nnet.schedulers.update_learning_rate(
                 self.weights_optimizer, new_lr_weights
             )
+
             self.hparams.train_logger.log_stats(
                 stats_meta={
                     "epoch": epoch,
@@ -148,12 +165,10 @@ class ASR(sb.Brain):
             self.checkpointer.add_recoverable(
                 "weights_opt", self.weights_optimizer
             )
-# Define custom data procedure
-def dataio_prepare(hparams, tokenizer):
+
+def dataio_prepare(hparams):
     """This function prepares the datasets to be used in the brain class.
     It also defines the data processing pipeline through user-defined functions."""
-
-    # 1. Define datasets
     data_folder = hparams["data_folder"]
 
     train_data = sb.dataio.dataset.DynamicItemDataset.from_csv(
@@ -162,21 +177,16 @@ def dataio_prepare(hparams, tokenizer):
 
     if hparams["sorting"] == "ascending":
         # we sort training data to speed up training and get better results.
-        train_data = train_data.filtered_sorted(
-            sort_key="duration",
-            key_max_value={"duration": hparams["avoid_if_longer_than"]},
-        )
+        train_data = train_data.filtered_sorted(sort_key="duration")
         # when sorting do not shuffle in dataloader ! otherwise is pointless
-        hparams["dataloader_options"]["shuffle"] = False
+        hparams["train_dataloader_opts"]["shuffle"] = False
 
     elif hparams["sorting"] == "descending":
         train_data = train_data.filtered_sorted(
-            sort_key="duration",
-            reverse=True,
-            key_max_value={"duration": hparams["avoid_if_longer_than"]},
+            sort_key="duration", reverse=True
         )
         # when sorting do not shuffle in dataloader ! otherwise is pointless
-        hparams["dataloader_options"]["shuffle"] = False
+        hparams["train_dataloader_opts"]["shuffle"] = False
 
     elif hparams["sorting"] == "random":
         pass
@@ -189,49 +199,67 @@ def dataio_prepare(hparams, tokenizer):
     valid_data = sb.dataio.dataset.DynamicItemDataset.from_csv(
         csv_path=hparams["valid_csv"], replacements={"data_root": data_folder},
     )
-    # We also sort the validation data so it is faster to validate
     valid_data = valid_data.filtered_sorted(sort_key="duration")
 
-    test_data = sb.dataio.dataset.DynamicItemDataset.from_csv(
-        csv_path=hparams["test_csv"], replacements={"data_root": data_folder},
-    )
+    # test is separate
+    test_datasets = {}
+    for csv_file in hparams["test_csv"]:
+        name = Path(csv_file).stem
+        test_datasets[name] = sb.dataio.dataset.DynamicItemDataset.from_csv(
+            csv_path=csv_file, replacements={"data_root": data_folder}
+        )
+        test_datasets[name] = test_datasets[name].filtered_sorted(
+            sort_key="duration"
+        )
 
-    # We also sort the validation data so it is faster to validate
-    test_data = test_data.filtered_sorted(sort_key="duration")
-
-    datasets = [train_data, valid_data, test_data]
+    datasets = [train_data, valid_data] + [i for k, i in test_datasets.items()]
 
     # 2. Define audio pipeline:
     @sb.utils.data_pipeline.takes("wav")
     @sb.utils.data_pipeline.provides("sig")
     def audio_pipeline(wav):
-        info = torchaudio.info(wav)
         sig = sb.dataio.dataio.read_audio(wav)
-        resampled = torchaudio.transforms.Resample(
-            info.sample_rate, hparams["sample_rate"],
-        )(sig)
-        return resampled
+        return sig
 
     sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
+    label_encoder = sb.dataio.encoder.CTCTextEncoder()
 
     # 3. Define text pipeline:
     @sb.utils.data_pipeline.takes("wrd")
     @sb.utils.data_pipeline.provides(
-        "tokens_list",  "tokens"
+        "wrd", "char_list", "tokens_list", "tokens"
     )
     def text_pipeline(wrd):
-        tokens_list = tokenizer.sp.encode_as_ids(wrd)
+        yield wrd
+        char_list = list(wrd)
+        yield char_list
+        tokens_list = label_encoder.encode_sequence(char_list)
         yield tokens_list
         tokens = torch.LongTensor(tokens_list)
         yield tokens
 
     sb.dataio.dataset.add_dynamic_item(datasets, text_pipeline)
 
+    lab_enc_file = os.path.join(hparams["save_folder"], "label_encoder.txt")
+    special_labels = {
+        "blank_label": hparams["blank_index"],
+        "unk_label": hparams["unk_index"],
+    }
+    label_encoder.load_or_create(
+        path=lab_enc_file,
+        from_didatasets=[train_data],
+        output_key="char_list",
+        special_labels=special_labels,
+        sequence_input=True,
+    )
+
     # 4. Set output:
     sb.dataio.dataset.set_output_keys(
-        datasets, ["id", "sig", "tokens"],
+        datasets,
+        ["id", "sig", "wrd", "char_list",  "tokens"],
     )
-    return train_data, valid_data, test_data
+    return train_data, valid_data, test_datasets, label_encoder
+
 
 if __name__ == "__main__":
 
@@ -252,38 +280,48 @@ if __name__ == "__main__":
         overrides=overrides,
     )
     
-    #Dataset preparation
-    from common_voice_prepare import prepare_common_voice  # noqa
+    # Dataset prep (parsing Librispeech)
+    from librispeech_prepare import prepare_librispeech  # noqa
+
     # multi-gpu (ddp) save data preparation
-    # Due to DDP, we do the preparation ONLY on the main python process
+    """
     run_on_main(
-        prepare_common_voice,
+        prepare_librispeech,
         kwargs={
             "data_folder": hparams["data_folder"],
-            "save_folder": hparams["save_folder"],
-            "train_tsv_file": hparams["train_tsv_file"],
-            "dev_tsv_file": hparams["dev_tsv_file"],
-            "test_tsv_file": hparams["test_tsv_file"],
-            "accented_letters": hparams["accented_letters"],
-            "language": hparams["language"],
+            "tr_splits": hparams["train_splits"],
+            "dev_splits": hparams["dev_splits"],
+            "te_splits": hparams["test_splits"],
+            "save_folder": hparams["output_folder"],
+            "merge_lst": hparams["train_splits"],
+            "merge_name": "train.csv",
             "skip_prep": hparams["skip_prep"],
         },
     )
+    """
 
-
-    # Defining tokenizer and loading it
-    tokenizer = SentencePiece(
-        model_dir=hparams["save_folder"],
-        vocab_size=hparams["output_neurons"],
-        annotation_train=hparams["train_csv"],
-        annotation_read="wrd",
-        model_type=hparams["token_type"],
-        character_coverage=hparams["character_coverage"],
+    # here we create the datasets objects as well as tokenization and encoding
+    train_data, valid_data, test_datasets, label_encoder = dataio_prepare(
+        hparams
     )
-
-    # Create the datasets objects as well as tokenization and encoding :-D
-    train_data, valid_data, test_data = dataio_prepare(hparams, tokenizer)
-
+    # Loading the labels for the LM decoding and the CTC decoder
+    if "language_modelling" in hparams:
+        if hparams["language_modelling"]:
+            ind2lab = label_encoder.ind2lab
+            labels = [ind2lab[x] for x in range(len(ind2lab))]
+            labels = [""] + labels[
+                1:
+            ]  # Replace the <blank> token with a blank character, needed for PyCTCdecode
+            decoder = build_ctcdecoder(
+                labels,
+                kenlm_model_path=hparams[
+                    "ngram_lm_path"
+                ],  # either .arpa or .bin file
+                alpha=0.5,  # tuned on a val set
+                beta=1.0,  # tuned on a val set
+            )
+    else:
+        hparams["language_modelling"] = False
 
     # Trainer initialization
     asr_brain = ASR(
@@ -293,7 +331,10 @@ if __name__ == "__main__":
         checkpointer=hparams["checkpointer"],
     )
 
-    asr_brain.tokenizer = tokenizer
+    # Loading the SSL model
+    # We dynamicaly add the tokenizer to our brain class.
+    # NB: This tokenizer corresponds to the one used for the LM!!
+    asr_brain.tokenizer = label_encoder
     # Training
     asr_brain.fit(
         asr_brain.hparams.epoch_counter,
@@ -304,10 +345,10 @@ if __name__ == "__main__":
     )
 
     # Testing
-    asr_brain.hparams.wer_file = hparams["output_folder"] + "/wer_test.txt"
-    asr_brain.evaluate(
-        test_data,
-        min_key="WER",
-        test_loader_kwargs=hparams["test_dataloader_options"],
-    )
-
+    for k in test_datasets.keys():  # keys are test_clean, test_other etc
+        asr_brain.hparams.wer_file = os.path.join(
+            hparams["output_folder"], "wer_{}.txt".format(k)
+        )
+        asr_brain.evaluate(
+            test_datasets[k], test_loader_kwargs=hparams["test_dataloader_opts"]
+        )

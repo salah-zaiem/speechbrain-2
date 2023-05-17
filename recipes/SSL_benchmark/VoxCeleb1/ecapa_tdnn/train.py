@@ -22,7 +22,8 @@ from speechbrain.utils.data_utils import download_file
 from hyperpyyaml import load_hyperpyyaml
 from speechbrain.utils.metric_stats import EER, minDCF
 from speechbrain.utils.distributed import run_on_main
-from load_and_featurize import load_model, featurize
+
+
 def compute_embedding(wavs, wav_lens):
     """Compute speaker embeddings.
 
@@ -36,8 +37,9 @@ def compute_embedding(wavs, wav_lens):
         in the length (e.g., [0.8 0.6 1.0])
     """
     with torch.no_grad():
-        wav_lens = wav_lens.to(speaker_brain.device)
-        feats = featurize( hf_model, speaker_brain.layers_weights, wavs.to(hparams["device"]), wav_lens, hparams)
+        wavs, wav_lens = wavs.to(speaker_brain.device),wav_lens.to(speaker_brain.device)
+    
+        feats = speaker_brain.modules.weighted_ssl_model(wavs) 
         embeddings = speaker_brain.modules.embedding_model(feats, wav_lens)
     return embeddings.squeeze(1)
 
@@ -218,8 +220,7 @@ class SpeakerBrain(sb.core.Brain):
         """
         batch = batch.to(self.device)
         wavs, lens = batch.sig
-
-        feats = featurize( hf_model, self.layers_weights, wavs, lens, hparams)
+        feats = self.modules.weighted_ssl_model(wavs)
         # Embeddings + speaker classifier
         embeddings = self.modules.embedding_model(feats)
         outputs = self.modules.classifier(embeddings)
@@ -251,10 +252,10 @@ class SpeakerBrain(sb.core.Brain):
         loss.backward()
         if self.check_gradients(loss):
             self.model_optimizer.step()
-            self.wav2vec_optimizer.step()
+            self.weights_optimizer.step()
 
         self.model_optimizer.zero_grad()
-        self.wav2vec_optimizer.zero_grad()
+        self.weights_optimizer.zero_grad()
         return loss.detach()
 
     def on_stage_start(self, stage, epoch=None):
@@ -287,19 +288,16 @@ class SpeakerBrain(sb.core.Brain):
                 min_keys=["ErrorRate"],
             )
     def init_optimizers(self):
-        "Initializes the wav2vec2 optimizer and model optimizer"
-        print(self.layers_weights)
-        self.wav2vec_optimizer = self.hparams.wav2vec_opt_class(
-            [self.layers_weights]
-        )
-        self.model_optimizer = self.hparams.opt_class(self.modules.parameters())
-
+        "Initializes the weights optimizer and model optimizer"
+        self.weights_optimizer = self.hparams.weights_opt_class([self.modules.weighted_ssl_model.weights])
+        self.model_optimizer = self.hparams.model_opt_class(self.hparams.model.parameters())
+        #Initializing the weights
         if self.checkpointer is not None:
             self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
             self.checkpointer.add_recoverable(
-                "wav2vec_opt", self.wav2vec_optimizer
+                "weights_opt", self.weights_optimizer
             )
-            self.checkpointer.add_recoverable("weights", self.layers_weights)
+
 
 
 
@@ -408,11 +406,7 @@ if __name__ == "__main__":
     if not hparams["pretrain"]:
         run_on_main(hparams["pretrainer"].collect_files)
         hparams["pretrainer"].load_collected()
-    from transformers import AutoProcessor, AutoModelForPreTraining, Wav2Vec2FeatureExtractor
-    from transformers import AutoModel
 
-
-    hf_model = load_model(hparams)
    
 
     # Dataset IO prep: creating Dataset objects and proper encodings for phones
@@ -433,19 +427,6 @@ if __name__ == "__main__":
         run_opts=run_opts,
         checkpointer=hparams["checkpointer"],
     )
-    hf_model.to(speaker_brain.device)
-    # We dynamicaly add the tokenizer to our brain class.
-    # NB: This tokenizer corresponds to the one used for the LM!!
-    if not os.path.exists(hparams["weights_path"]): 
-        #Zero initializiation like in S3PRL, not sure if it is the best choice, test torch.rand !   
-        end_init = torch.cat([torch.zeros(hparams["num_layers"])])
-    else : 
-        end_init = torch.load(hparams["weights_path"])
-        print("loaded weights")
-    speaker_brain.layers_weights = torch.nn.Parameter(end_init, requires_grad=True)
-    torch.save(speaker_brain.layers_weights, hparams["weights_path"])
-    speaker_brain.layers_weights.to(speaker_brain.device)
-
     #for name, param in speaker_brain.modules.wav2vec2.named_parameters():
     #    print (name)
     #    print(param.data)
