@@ -269,7 +269,6 @@ class SpeakerBrain(sb.core.Brain):
         stage_stats = {"loss": stage_loss}
         if stage == sb.Stage.TRAIN:
             self.train_stats = stage_stats
-            torch.save(self.layers_weights, self.hparams.weights_path)
         else:
             stage_stats["ErrorRate"] = self.error_metrics.summarize("average")
 
@@ -422,7 +421,6 @@ if __name__ == "__main__":
     # Brain class initialization
     speaker_brain = SpeakerBrain(
         modules=hparams["modules"],
-        opt_class=hparams["opt_class"],
         hparams=hparams,
         run_opts=run_opts,
         checkpointer=hparams["checkpointer"],
