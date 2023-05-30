@@ -1,15 +1,7 @@
 #!/usr/bin/python3
-"""Recipe for training speaker embeddings (e.g, xvectors) using the VoxCeleb Dataset.
-We employ an encoder followed by a speaker classifier.
-
-To run this recipe, use the following command:
-> python train_speaker_embeddings.py {hyperparameter_file}
-
-Using your own hyperparameter file or one of the following:
-    hyperparams/train_x_vectors.yaml (for standard xvectors)
-    hyperparams/train_ecapa_tdnn.yaml (for the ecapa+tdnn system)
-
+"""Recipe for training then testing speaker embeddings using the VoxCeleb Dataset.
 """
+
 import os
 from tqdm import tqdm
 import sys
@@ -37,9 +29,12 @@ def compute_embedding(wavs, wav_lens):
         in the length (e.g., [0.8 0.6 1.0])
     """
     with torch.no_grad():
-        wavs, wav_lens = wavs.to(speaker_brain.device),wav_lens.to(speaker_brain.device)
-    
-        feats = speaker_brain.modules.weighted_ssl_model(wavs) 
+        wavs, wav_lens = (
+            wavs.to(speaker_brain.device),
+            wav_lens.to(speaker_brain.device),
+        )
+
+        feats = speaker_brain.modules.weighted_ssl_model(wavs)
         embeddings = speaker_brain.modules.embedding_model(feats, wav_lens)
     return embeddings.squeeze(1)
 
@@ -208,7 +203,6 @@ def dataio_prep_verif(params):
     return train_dataloader, enrol_dataloader, test_dataloader
 
 
-
 class SpeakerBrain(sb.core.Brain):
     """Class for speaker embedding training"
     """
@@ -275,7 +269,9 @@ class SpeakerBrain(sb.core.Brain):
         # Perform end-of-iteration things, like annealing, logging, etc.
         if stage == sb.Stage.VALID:
             old_lr, new_lr = self.hparams.lr_annealing(epoch)
-            sb.nnet.schedulers.update_learning_rate(self.model_optimizer, new_lr)
+            sb.nnet.schedulers.update_learning_rate(
+                self.model_optimizer, new_lr
+            )
 
             self.hparams.train_logger.log_stats(
                 stats_meta={"epoch": epoch, "lr": old_lr},
@@ -286,19 +282,21 @@ class SpeakerBrain(sb.core.Brain):
                 meta={"ErrorRate": stage_stats["ErrorRate"]},
                 min_keys=["ErrorRate"],
             )
+
     def init_optimizers(self):
         "Initializes the weights optimizer and model optimizer"
-        self.weights_optimizer = self.hparams.weights_opt_class([self.modules.weighted_ssl_model.weights])
-        self.model_optimizer = self.hparams.model_opt_class(self.hparams.model.parameters())
-        #Initializing the weights
+        self.weights_optimizer = self.hparams.weights_opt_class(
+            [self.modules.weighted_ssl_model.weights]
+        )
+        self.model_optimizer = self.hparams.model_opt_class(
+            self.hparams.model.parameters()
+        )
+        # Initializing the weights
         if self.checkpointer is not None:
             self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
             self.checkpointer.add_recoverable(
                 "weights_opt", self.weights_optimizer
             )
-
-
-
 
 
 def dataio_prep(hparams):
@@ -389,6 +387,7 @@ if __name__ == "__main__":
 
     # Dataset prep (parsing VoxCeleb and annotation into csv files)
     from voxceleb_prepare import prepare_voxceleb  # noqa
+
     prepare_voxceleb(
         data_folder=hparams["data_folder"],
         save_folder=hparams["save_folder"],
@@ -396,17 +395,15 @@ if __name__ == "__main__":
         splits=["train", "dev", "test"],
         split_ratio=[90, 10],
         seg_dur=hparams["sentence_len"],
-        source=params["voxceleb_source"]
+        source=hparams["voxceleb_source"]
         if "voxceleb_source" in hparams
         else None,
     )
 
-    #Loading wav2vec2.0 
+    # Loading wav2vec2.0
     if not hparams["pretrain"]:
         run_on_main(hparams["pretrainer"].collect_files)
         hparams["pretrainer"].load_collected()
-
-   
 
     # Dataset IO prep: creating Dataset objects and proper encodings for phones
     train_data, valid_data, label_encoder = dataio_prep(hparams)
@@ -417,7 +414,7 @@ if __name__ == "__main__":
         hyperparams_to_save=hparams_file,
         overrides=overrides,
     )
-   
+
     # Brain class initialization
     speaker_brain = SpeakerBrain(
         modules=hparams["modules"],
@@ -425,7 +422,7 @@ if __name__ == "__main__":
         run_opts=run_opts,
         checkpointer=hparams["checkpointer"],
     )
-    #for name, param in speaker_brain.modules.wav2vec2.named_parameters():
+    # for name, param in speaker_brain.modules.wav2vec2.named_parameters():
     #    print (name)
     #    print(param.data)
     # Training
@@ -436,14 +433,14 @@ if __name__ == "__main__":
         train_loader_kwargs=hparams["dataloader_options"],
         valid_loader_kwargs=hparams["dataloader_options"],
     )
-    
 
-
-    #Now preparing for test : 
+    # Now preparing for test :
     hparams["device"] = speaker_brain.device
 
     speaker_brain.modules.eval()
-    train_dataloader, enrol_dataloader, test_dataloader = dataio_prep_verif(hparams)
+    train_dataloader, enrol_dataloader, test_dataloader = dataio_prep_verif(
+        hparams
+    )
     # Computing  enrollment and test embeddings
     logger.info("Computing enroll/test embeddings...")
 

@@ -1,28 +1,18 @@
 #!/usr/bin/env/python3
-"""Recipe for training a encoder -based ctc ASR system with librispeech.
-The system employs encoder  as its encoder. Decoding is performed with
-ctc greedy decoder.
-To run this recipe, do the following:
-> python train_with_encoder .py hparams/train_with_encoder .yaml
-The neural network is trained on CTC likelihood target and character units
-are used as basic recognition tokens. Training is performed on the full
-LibriSpeech dataset (960 h).
-
+"""Recipe for training an SSL-based ctc ASR system with Buckeye.
+Decoding is performed with ctc greedy or LM-rescored decoder.
 """
 
 import os
 import sys
-sys.path.append("/home/infres/ext-6343/venv_git_superb/The-audio-benchmark/speechbrain-develop")
-
 import torch
 import logging
 import speechbrain as sb
 from speechbrain.utils.distributed import run_on_main
 from hyperpyyaml import load_hyperpyyaml
 from pathlib import Path
-from transformers import AutoModel
-
 from pyctcdecode import build_ctcdecoder
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,8 +24,8 @@ class ASR(sb.Brain):
         wavs, wav_lens = batch.sig
         wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
         # Forward pass
-        feats = self.modules.weighted_ssl_model(wavs) 
-        y = self.modules.enc(feats) 
+        feats = self.modules.weighted_ssl_model(wavs)
+        y = self.modules.enc(feats)
         # Compute outputs
         p_tokens = None
         logits = self.modules.ctc_lin(y)
@@ -64,8 +54,8 @@ class ASR(sb.Brain):
             target_words = [wrd.split(" ") for wrd in batch.wrd]
             self.wer_metric.append(ids, predicted_words, target_words)
             self.cer_metric.append(ids, predicted_words, target_words)
-        
-        elif stage == sb.Stage.TEST : 
+
+        elif stage == sb.Stage.TEST:
             if self.hparams.language_modelling:
                 predicted_words = []
                 for logs in p_ctc:
@@ -82,7 +72,6 @@ class ASR(sb.Brain):
             self.cer_metric.append(ids, predicted_words, target_words)
 
         return loss
-
 
     def fit_batch(self, batch):
         """Train the parameters given a single batch in input"""
@@ -125,7 +114,7 @@ class ASR(sb.Brain):
             old_lr_model, new_lr_model = self.hparams.lr_annealing_model(
                 stage_stats["loss"]
             )
-            old_lr_weights, new_lr_weights= self.hparams.lr_annealing_weights(
+            old_lr_weights, new_lr_weights = self.hparams.lr_annealing_weights(
                 stage_stats["loss"]
             )
             sb.nnet.schedulers.update_learning_rate(
@@ -136,10 +125,7 @@ class ASR(sb.Brain):
             )
 
             self.hparams.train_logger.log_stats(
-                stats_meta={
-                    "epoch": epoch,
-                    "lr_model": old_lr_model,
-                },
+                stats_meta={"epoch": epoch, "lr_model": old_lr_model, },
                 train_stats=self.train_stats,
                 valid_stats=stage_stats,
             )
@@ -156,14 +142,19 @@ class ASR(sb.Brain):
 
     def init_optimizers(self):
         "Initializes the weights optimizer and model optimizer"
-        self.weights_optimizer = self.hparams.weights_opt_class([self.modules.weighted_ssl_model.weights])
-        self.model_optimizer = self.hparams.model_opt_class(self.hparams.model.parameters())
-        #Initializing the weights
+        self.weights_optimizer = self.hparams.weights_opt_class(
+            [self.modules.weighted_ssl_model.weights]
+        )
+        self.model_optimizer = self.hparams.model_opt_class(
+            self.hparams.model.parameters()
+        )
+        # Initializing the weights
         if self.checkpointer is not None:
             self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
             self.checkpointer.add_recoverable(
                 "weights_opt", self.weights_optimizer
             )
+
 
 def dataio_prepare(hparams):
     """This function prepares the datasets to be used in the brain class.
@@ -222,8 +213,9 @@ def dataio_prepare(hparams):
         speech_segment = {"file": wav, "start": start, "stop": stop}
         sig = sb.dataio.dataio.read_audio(speech_segment)
         return sig
+
     sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
- 
+
     label_encoder = sb.dataio.encoder.CTCTextEncoder()
 
     # 3. Define text pipeline:
@@ -257,8 +249,7 @@ def dataio_prepare(hparams):
 
     # 4. Set output:
     sb.dataio.dataset.set_output_keys(
-        datasets,
-        ["id", "sig", "wrd", "char_list",  "tokens"],
+        datasets, ["id", "sig", "wrd", "char_list", "tokens"],
     )
     return train_data, valid_data, test_datasets, label_encoder
 
@@ -281,7 +272,7 @@ if __name__ == "__main__":
         hyperparams_to_save=hparams_file,
         overrides=overrides,
     )
-    
+
     # here we create the datasets objects as well as tokenization and encoding
     train_data, valid_data, test_datasets, label_encoder = dataio_prepare(
         hparams

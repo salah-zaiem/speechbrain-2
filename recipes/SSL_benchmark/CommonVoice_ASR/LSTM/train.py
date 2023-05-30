@@ -1,31 +1,22 @@
 #!/usr/bin/env/python3
-"""Recipe for training a encoder -based ctc ASR system with librispeech.
-The system employs encoder  as its encoder. Decoding is performed with
-ctc greedy decoder.
-To run this recipe, do the following:
-> python train_with_encoder .py hparams/train_with_encoder .yaml
-The neural network is trained on CTC likelihood target and character units
-are used as basic recognition tokens. Training is performed on the full
-LibriSpeech dataset (960 h).
-
+"""
+Script for training an ASR model evaluating an SSL representation
+model on one language from the CommonVoice dataset. A SentencePiece tokenizer
+with number of tokens equal to <output_neurons> is learned in a first phase, on
+the considered langauge.
 """
 
-import os
 import sys
-sys.path.append("/home/infres/ext-6343/venv_git_superb/The-audio-benchmark/speechbrain-develop")
-
 import torch
 import logging
 import speechbrain as sb
 from speechbrain.utils.distributed import run_on_main
 from hyperpyyaml import load_hyperpyyaml
-from pathlib import Path
-from transformers import AutoModel
 import torchaudio
-from pyctcdecode import build_ctcdecoder
-logger = logging.getLogger(__name__)
 from speechbrain.tokenizers.SentencePiece import SentencePiece
 from speechbrain.utils.data_utils import undo_padding
+logger = logging.getLogger(__name__)
+
 
 # Define training procedure
 class ASR(sb.Brain):
@@ -35,9 +26,9 @@ class ASR(sb.Brain):
         wavs, wav_lens = batch.sig
         wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
         # Forward pass
-        feats = self.modules.weighted_ssl_model(wavs) 
-        y = self.modules.enc(feats) 
-        y=y[0] # As it is an RNN output
+        feats = self.modules.weighted_ssl_model(wavs)
+        y = self.modules.enc(feats)
+        y = y[0]  # As it is an RNN output
         # Compute outputs
         p_tokens = None
         logits = self.modules.ctc_lin(y)
@@ -59,7 +50,9 @@ class ASR(sb.Brain):
 
         if stage != sb.Stage.TRAIN:
             # Decode token terms to words
-            predicted_words = self.tokenizer(predicted_tokens, task="decode_from_list")
+            predicted_words = self.tokenizer(
+                predicted_tokens, task="decode_from_list"
+            )
 
             # Convert indices to words
             target_words = undo_padding(tokens, tokens_lens)
@@ -68,7 +61,6 @@ class ASR(sb.Brain):
             self.wer_metric.append(ids, predicted_words, target_words)
             self.cer_metric.append(ids, predicted_words, target_words)
         return loss
-
 
     def fit_batch(self, batch):
         """Train the parameters given a single batch in input"""
@@ -110,7 +102,7 @@ class ASR(sb.Brain):
             old_lr_model, new_lr_model = self.hparams.lr_annealing_model(
                 stage_stats["loss"]
             )
-            old_lr_weights, new_lr_weights= self.hparams.lr_annealing_weights(
+            old_lr_weights, new_lr_weights = self.hparams.lr_annealing_weights(
                 stage_stats["loss"]
             )
             sb.nnet.schedulers.update_learning_rate(
@@ -120,10 +112,7 @@ class ASR(sb.Brain):
                 self.weights_optimizer, new_lr_weights
             )
             self.hparams.train_logger.log_stats(
-                stats_meta={
-                    "epoch": epoch,
-                    "lr_model": old_lr_model,
-                },
+                stats_meta={"epoch": epoch, "lr_model": old_lr_model, },
                 train_stats=self.train_stats,
                 valid_stats=stage_stats,
             )
@@ -140,14 +129,20 @@ class ASR(sb.Brain):
 
     def init_optimizers(self):
         "Initializes the weights optimizer and model optimizer"
-        self.weights_optimizer = self.hparams.weights_opt_class([self.modules.weighted_ssl_model.weights])
-        self.model_optimizer = self.hparams.model_opt_class(self.hparams.model.parameters())
-        #Initializing the weights
+        self.weights_optimizer = self.hparams.weights_opt_class(
+            [self.modules.weighted_ssl_model.weights]
+        )
+        self.model_optimizer = self.hparams.model_opt_class(
+            self.hparams.model.parameters()
+        )
+        # Initializing the weights
         if self.checkpointer is not None:
             self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
             self.checkpointer.add_recoverable(
                 "weights_opt", self.weights_optimizer
             )
+
+
 # Define custom data procedure
 def dataio_prepare(hparams, tokenizer):
     """This function prepares the datasets to be used in the brain class.
@@ -216,9 +211,7 @@ def dataio_prepare(hparams, tokenizer):
 
     # 3. Define text pipeline:
     @sb.utils.data_pipeline.takes("wrd")
-    @sb.utils.data_pipeline.provides(
-        "tokens_list",  "tokens"
-    )
+    @sb.utils.data_pipeline.provides("tokens_list", "tokens")
     def text_pipeline(wrd):
         tokens_list = tokenizer.sp.encode_as_ids(wrd)
         yield tokens_list
@@ -232,6 +225,7 @@ def dataio_prepare(hparams, tokenizer):
         datasets, ["id", "sig", "tokens"],
     )
     return train_data, valid_data, test_data
+
 
 if __name__ == "__main__":
 
@@ -251,9 +245,10 @@ if __name__ == "__main__":
         hyperparams_to_save=hparams_file,
         overrides=overrides,
     )
-    
-    #Dataset preparation
+
+    # Dataset preparation
     from common_voice_prepare import prepare_common_voice  # noqa
+
     # multi-gpu (ddp) save data preparation
     # Due to DDP, we do the preparation ONLY on the main python process
     run_on_main(
@@ -270,7 +265,6 @@ if __name__ == "__main__":
         },
     )
 
-
     # Defining tokenizer and loading it
     tokenizer = SentencePiece(
         model_dir=hparams["save_folder"],
@@ -283,7 +277,6 @@ if __name__ == "__main__":
 
     # Create the datasets objects as well as tokenization and encoding :-D
     train_data, valid_data, test_data = dataio_prepare(hparams, tokenizer)
-
 
     # Trainer initialization
     asr_brain = ASR(
@@ -310,4 +303,3 @@ if __name__ == "__main__":
         min_key="WER",
         test_loader_kwargs=hparams["test_dataloader_options"],
     )
-
