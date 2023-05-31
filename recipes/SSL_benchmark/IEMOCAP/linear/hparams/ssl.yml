@@ -9,15 +9,19 @@ __set_seed: !apply:torch.manual_seed [!ref <seed>]
 
 # Dataset will be downloaded to the `data_original`
 data_folder: /home/infres/ext-6343/venv_superb/The-audio-benchmark/speechbrain-develop/downstream/IEMOCAP/data/IEMOCAP_full_release # e.g., /path/to/IEMOCAP_full_release
-output_folder: !ref results/hubert_base/<seed>
+output_folder: !ref /home/infres/ext-6343/venv_speechbrain_SSL/speechbrain-2/recipes/SSL_benchmark/IEMOCAP/linear/results/wavlm_base/<seed>
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
 
 # URL for the ssl encoder  model, you can change to benchmark diffrenet models
 # Important: we use ssl encoder base and not the fine-tuned one with ASR task
 # This allow you to have ~4% improvment
-hub: facebook/hubert-base-ls960
-num_layers: 13
+
+ssl_hub: microsoft/wavlm-base
+num_layers_ssl: 13  #Number of layers in the SSL model (should be 25 for large models and 13 for base or distilled)
+encoder_dim: 768
+
+
 weights_path: !ref <save_folder>/weights.ckpt
 # different speakers for train, valid and test sets
 different_speakers: True
@@ -39,26 +43,32 @@ ckpt_interval_minutes: 15 # save checkpoint every N min
 # Training parameters
 number_of_epochs: 30
 batch_size: 2
+test_batch_size: 2
+
 lr: 0.0002
-lr_encoder: 0.01
-
-#freeze all wav2vec2
-freeze_model: True
-#set to true to freeze the CONV part of the ssl encoder model
-# We see an improvement of 2% with freezing CNNs
-freeze_model_conv: True
-
-# Model parameters
-encoder_dim: 768
+lr_weights: 0.01
 
 # Number of emotions
 out_n_neurons: 4 # (anger, happiness, sadness, neutral)
 
-dataloader_options:
-    batch_size: !ref <batch_size>
-    shuffle: True
-    num_workers: 2  # 2 on linux but 0 works on windows
-    drop_last: False
+# Dataloader options
+train_dataloader_opts:
+   batch_size: !ref <batch_size>
+   shuffle: True
+   num_workers: 2  # 2 on linux but 0 works on windows
+   drop_last: False
+
+valid_dataloader_opts:
+   batch_size: !ref <batch_size>
+
+test_dataloader_opts:
+   batch_size: !ref <test_batch_size>
+
+
+
+weighted_ssl_model: !new:speechbrain.lobes.models.huggingface_wav2vec.WeightedSSLModel
+   hub: !ref <ssl_hub>
+   num_layers: !ref <num_layers_ssl>
 
 
 avg_pool: !new:speechbrain.nnet.pooling.StatisticsPooling
@@ -74,6 +84,7 @@ epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
 
 modules:
     output_mlp: !ref <output_mlp>
+    weighted_ssl_model: !ref <weighted_ssl_model>
 
 model: !new:torch.nn.ModuleList
     - [!ref <output_mlp>]
@@ -87,28 +98,29 @@ error_stats: !name:speechbrain.utils.metric_stats.MetricStats
     metric: !name:speechbrain.nnet.losses.classification_error
         reduction: batch
 
-opt_class: !name:torch.optim.Adam
+model_opt_class: !name:torch.optim.Adam
     lr: !ref <lr>
 
-encoder_opt_class: !name:torch.optim.Adam
-    lr: !ref <lr_encoder>
+weights_opt_class: !name:torch.optim.Adam
+    lr: !ref <lr_weights>
 
-lr_annealing: !new:speechbrain.nnet.schedulers.NewBobScheduler
+lr_annealing_model: !new:speechbrain.nnet.schedulers.NewBobScheduler
     initial_value: !ref <lr>
     improvement_threshold: 0.0025
     annealing_factor: 0.9
     patient: 0
 
- 
-lr_annealing_encoder: !new:speechbrain.nnet.schedulers.NewBobScheduler
-    initial_value: !ref <lr_encoder>
+lr_annealing_weights: !new:speechbrain.nnet.schedulers.NewBobScheduler
+    initial_value: !ref <lr_weights>
     improvement_threshold: 0.0025
     annealing_factor: 0.9
+
 
 checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
     checkpoints_dir: !ref <save_folder>
     recoverables:
         model: !ref <model>
-        lr_annealing_output: !ref <lr_annealing>
-        lr_annealing_encoder: !ref <lr_annealing_encoder>
+        ssl_model: !ref <weighted_ssl_model>
+        scheduler_model: !ref <lr_annealing_model>
+        scheduler_encoder: !ref <lr_annealing_weights>
         counter: !ref <epoch_counter>

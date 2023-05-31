@@ -21,11 +21,11 @@ from torch import nn
 from huggingface_hub import model_info
 from speechbrain.pretrained.fetching import fetch
 from speechbrain.dataio.dataio import length_to_mask
+from transformers import AutoModel
 
 # We check if transformers is installed.
 try:
     import transformers
-    from transformers import AutoModel
     from transformers import Wav2Vec2Model, HubertModel, WavLMModel
     from transformers import Wav2Vec2Config, HubertConfig, WavLMConfig
     from transformers import Wav2Vec2FeatureExtractor
@@ -52,7 +52,6 @@ HF_config = {
     "hubert": HubertConfig,
     "wavlm": WavLMConfig,
 }
-
 
 class HuggingFaceWav2Vec2(nn.Module):
     """This lobe enables the integration of HuggingFace and SpeechBrain
@@ -504,7 +503,6 @@ class HuggingFaceWav2Vec2Pretrain(nn.Module):
             src_key_padding_mask = length_to_mask(abs_len).bool()
 
         return src_key_padding_mask
-
 
 class WeightedSSLModel(torch.nn.Module):
     def __init__(self, hub, num_layers, layernorm=False):

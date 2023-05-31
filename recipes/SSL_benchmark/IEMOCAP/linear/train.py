@@ -13,42 +13,35 @@ Authors
 
 import os
 import sys
-sys.path.append("/home/infres/ext-6343/venv_git_superb/The-audio-benchmark/speechbrain-develop")
+
+sys.path.append("/home/infres/ext-6343/venv_speechbrain_SSL/speechbrain-2")
 
 import speechbrain as sb
 from hyperpyyaml import load_hyperpyyaml
 import torch
 
-os.environ["CUDA_VISIBLE_DEVICES"] ="1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 
 class EmoIdBrain(sb.Brain):
     def compute_forward(self, batch, stage):
-        """Computation pipeline based on a encoder + emotion classifier.
-        """
+        """Computation pipeline based on a encoder + emotion classifier."""
         batch = batch.to(self.device)
-        wavs, lens = batch.sig
+        wavs, wav_lens = batch.sig
+        wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
 
-        new_feats= hf_model(wavs)
-        x= new_feats.hidden_states
-        x= torch.stack(x, dim=0).detach()
-        norm_weights = torch.nn.functional.softmax(self.layers_weights, dim=-1)
-        layer_0 = x[0] * norm_weights[0]
-        for i in range(1, len(x)): 
-            layer_0 += x[i] * norm_weights[i]
-
-
+        feats = self.modules.weighted_ssl_model(wavs)
 
         # last dim will be used for AdaptativeAVG pool
-        outputs = self.hparams.avg_pool(layer_0, lens)
+        outputs = self.hparams.avg_pool(feats, wav_lens)
         outputs = outputs.view(outputs.shape[0], -1)
 
         outputs = self.modules.output_mlp(outputs)
         outputs = self.hparams.log_softmax(outputs)
         return outputs
+
     def compute_objectives(self, predictions, batch, stage):
-        """Computes the loss using speaker-id as label.
-        """
+        """Computes the loss using speaker-id as label."""
         emoid, _ = batch.emo_encoded
 
         """to meet the input form of nll loss"""
@@ -59,7 +52,6 @@ class EmoIdBrain(sb.Brain):
 
         return loss
 
-
     def fit_batch(self, batch):
         """Trains the parameters given a single batch in input"""
 
@@ -67,11 +59,11 @@ class EmoIdBrain(sb.Brain):
         loss = self.compute_objectives(predictions, batch, sb.Stage.TRAIN)
         loss.backward()
         if self.check_gradients(loss):
-            self.encoder_optimizer.step()
-            self.optimizer.step()
+            self.model_optimizer.step()
+            self.weights_optimizer.step()
 
-        self.encoder_optimizer.zero_grad()
-        self.optimizer.zero_grad()
+        self.model_optimizer.zero_grad()
+        self.weights_optimizer.zero_grad()
 
         return loss.detach()
 
@@ -122,16 +114,19 @@ class EmoIdBrain(sb.Brain):
 
         # At the end of validation...
         if stage == sb.Stage.VALID:
-
-            old_lr, new_lr = self.hparams.lr_annealing(stats["error_rate"])
-            sb.nnet.schedulers.update_learning_rate(self.optimizer, new_lr)
+            old_lr, new_lr = self.hparams.lr_annealing_model(
+                stats["error_rate"]
+            )
+            sb.nnet.schedulers.update_learning_rate(
+                self.model_optimizer, new_lr
+            )
 
             (
                 old_lr_encoder,
                 new_lr_encoder,
-            ) = self.hparams.lr_annealing_encoder(stats["error_rate"])
+            ) = self.hparams.lr_annealing_weights(stats["error_rate"])
             sb.nnet.schedulers.update_learning_rate(
-                self.encoder_optimizer, new_lr_encoder
+                self.weights_optimizer, new_lr_encoder
             )
 
             # The train_logger writes a summary to stdout and to the logfile.
@@ -152,20 +147,23 @@ class EmoIdBrain(sb.Brain):
                 {"Epoch loaded": self.hparams.epoch_counter.current},
                 test_stats=stats,
             )
+
     def init_optimizers(self):
-        "Initializes the encoder optimizer and model optimizer"
-        print(self.layers_weights)
-        self.encoder_optimizer = self.hparams.encoder_opt_class(
-            [self.layers_weights]
+        "Initializes the encoder2 optimizer and model optimizer"
+
+        self.weights_optimizer = self.hparams.weights_opt_class(
+            [self.modules.weighted_ssl_model.weights]
         )
-        self.optimizer = self.hparams.opt_class(self.hparams.model.parameters())
+        self.model_optimizer = self.hparams.model_opt_class(
+            self.hparams.model.parameters()
+        )
 
         if self.checkpointer is not None:
-            self.checkpointer.add_recoverable("modelopt", self.optimizer)
+            self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
             self.checkpointer.add_recoverable(
-                "encoder_opt", self.encoder_optimizer
+                "weights_opt", self.weights_optimizer
             )
-            self.checkpointer.add_recoverable("weights", self.layers_weights)
+
 
 def dataio_prep(hparams):
     """This function prepares the datasets to be used in the brain class.
@@ -235,12 +233,8 @@ def dataio_prep(hparams):
     return datasets
 
 
-
-
-
 # RECIPE BEGINS!
 if __name__ == "__main__":
-
     # Reading command line arguments.
     hparams_file, run_opts, overrides = sb.parse_arguments(sys.argv[1:])
 
@@ -257,7 +251,6 @@ if __name__ == "__main__":
         hyperparams_to_save=hparams_file,
         overrides=overrides,
     )
-    from transformers import AutoModel
 
     from iemocap_prepare import prepare_data  # noqa E402
 
@@ -276,8 +269,6 @@ if __name__ == "__main__":
         },
     )
 
-
-
     # Data preparation, to be run on only one process.
     # Create dataset objects "train", "valid", and "test".
     datasets = dataio_prep(hparams)
@@ -287,40 +278,41 @@ if __name__ == "__main__":
     # Initialize the Brain object to prepare for mask training.
     emo_id_brain = EmoIdBrain(
         modules=hparams["modules"],
-        opt_class=hparams["opt_class"],
         hparams=hparams,
         run_opts=run_opts,
         checkpointer=hparams["checkpointer"],
     )
-    hf_model = AutoModel.from_pretrained(hparams["hub"],output_hidden_states=True)
-    hf_model.eval()
 
-    if not os.path.exists(hparams["weights_path"]): 
-        #Zero initializiation like in S3PRL, not sure if it is the best choice, test torch.rand !   
-        end_init = torch.cat([torch.zeros(hparams["num_layers"])])
-    else : 
+    if not os.path.exists(hparams["weights_path"]):
+        # Zero initializiation like in S3PRL, not sure if it is the best choice, test torch.rand !
+        end_init = torch.cat([torch.zeros(hparams["num_layers_ssl"])])
+    else:
         end_init = torch.load(hparams["weights_path"])
         print("loaded weights")
-    emo_id_brain.layers_weights = torch.nn.Parameter(end_init, requires_grad=True)
+
+    emo_id_brain.layers_weights = torch.nn.Parameter(
+        end_init, requires_grad=True
+    )
     torch.save(emo_id_brain.layers_weights, hparams["weights_path"])
     emo_id_brain.layers_weights.to(emo_id_brain.device)
     emo_id_brain.checkpointer.recover_if_possible()
-    hf_model.to(emo_id_brain.device)
+
     # The `fit()` method iterates the training loop, calling the methods
     # necessary to update the parameters of the model. Since all objects
     # with changing state are managed by the Checkpointer, training can be
     # stopped at any point, and will be resumed on next call.
+
     emo_id_brain.fit(
         epoch_counter=emo_id_brain.hparams.epoch_counter,
         train_set=datasets["train"],
         valid_set=datasets["valid"],
-        train_loader_kwargs=hparams["dataloader_options"],
-        valid_loader_kwargs=hparams["dataloader_options"],
+        train_loader_kwargs=hparams["train_dataloader_opts"],
+        valid_loader_kwargs=hparams["valid_dataloader_opts"],
     )
 
     # Load the best checkpoint for evaluation
     test_stats = emo_id_brain.evaluate(
         test_set=datasets["test"],
         min_key="error_rate",
-        test_loader_kwargs=hparams["dataloader_options"],
+        test_loader_kwargs=hparams["test_dataloader_opts"],
     )

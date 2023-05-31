@@ -79,7 +79,7 @@ augmentation: !new:speechbrain.lobes.augment.TimeDomainSpecAugment
    sample_rate: !ref <sample_rate>
    speeds: [95, 100, 105]
 
-weighted_ssl_model: !new:speechbrain.lobes.models.huggingface_wav2vec.WeightedSSLModel
+weighted_ssl_model: !new:speechbrain.lobes.models.SSLModel.WeightedSSLModel
    hub: !ref <ssl_hub>
    num_layers: !ref <num_layers_ssl>
 

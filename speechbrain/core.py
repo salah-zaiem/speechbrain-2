@@ -855,6 +855,7 @@ class Brain:
             if self.checkpointer is not None:
                 self.checkpointer.add_recoverable("optimizer", self.optimizer)
 
+
     def zero_grad(self, set_to_none=False):
         """Sets the gradients of all optimized ``torch.Tensor``s to zero
         if ``set_to_none=False`` (default) or to None otherwise.

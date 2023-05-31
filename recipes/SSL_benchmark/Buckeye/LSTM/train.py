@@ -5,6 +5,12 @@ Decoding is performed with ctc greedy or LM-rescored decoder.
 
 import os
 import sys
+<<<<<<< Updated upstream
+=======
+sys.path.append("/home/infres/ext-6343/venv_speechbrain_SSL/speechbrain-2")
+os.environ["CUDA_VISIBLE_DEVICES"] ="0"
+
+>>>>>>> Stashed changes
 import torch
 import logging
 import speechbrain as sb
@@ -206,17 +212,17 @@ def dataio_prepare(hparams):
     datasets = [train_data, valid_data] + [i for k, i in test_datasets.items()]
 
     # 2. Define audio pipeline:
-    @sb.utils.data_pipeline.takes("wav", "start_seg", "end_seg")
+    @sb.utils.data_pipeline.takes("wav")
     @sb.utils.data_pipeline.provides("sig")
-    def audio_pipeline(wav, start_seg, end_seg):
-        start = int(float(start_seg) * hparams["sample_rate"])
-        stop = int(float(end_seg) * hparams["sample_rate"])
-        speech_segment = {"file": wav, "start": start, "stop": stop}
-        sig = sb.dataio.dataio.read_audio(speech_segment)
+    def audio_pipeline(wav):
+        sig = sb.dataio.dataio.read_audio(wav)
         return sig
 
     sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
     label_encoder = sb.dataio.encoder.CTCTextEncoder()
 
     # 3. Define text pipeline:
@@ -273,6 +279,29 @@ if __name__ == "__main__":
         hyperparams_to_save=hparams_file,
         overrides=overrides,
     )
+<<<<<<< Updated upstream
+=======
+    
+    # Dataset prep (parsing Librispeech)
+    from librispeech_prepare import prepare_librispeech  # noqa
+
+    # multi-gpu (ddp) save data preparation
+    """
+    run_on_main(
+        prepare_librispeech,
+        kwargs={
+            "data_folder": hparams["data_folder"],
+            "tr_splits": hparams["train_splits"],
+            "dev_splits": hparams["dev_splits"],
+            "te_splits": hparams["test_splits"],
+            "save_folder": hparams["output_folder"],
+            "merge_lst": hparams["train_splits"],
+            "merge_name": "train.csv",
+            "skip_prep": hparams["skip_prep"],
+        },
+    )
+    """
+>>>>>>> Stashed changes
 
     # here we create the datasets objects as well as tokenization and encoding
     train_data, valid_data, test_datasets, label_encoder = dataio_prepare(

@@ -17,7 +17,7 @@ train_log: !ref <output_folder>/train_log.txt
 # URL for the encoder  model, you can change to benchmark diffrenet models
 # Important: we use encoder  base and not the fine-tuned one with ASR task
 # This allow you to have ~4% improvment
-hub: facebook/hubert-large-ll60k
+ssl_hub: facebook/hubert-large-ll60k
 num_layers: 25
 weights_path: !ref <save_folder>/weights.ckpt
 # different speakers for train, valid and test sets
