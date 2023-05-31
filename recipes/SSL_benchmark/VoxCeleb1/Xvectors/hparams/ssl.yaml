@@ -77,7 +77,7 @@ epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
 
 ssl_hub: /gpfsstore/rech/nou/uzn19yk/distilhubert/
 
-weighted_ssl_model: !new:speechbrain.lobes.models.SSLModel.WeightedSSLModel
+weighted_ssl_model: !new:speechbrain.lobes.models.huggingface_wav2vec.WeightedSSLModel
    hub: !ref <ssl_hub>
    num_layers: !ref <num_layers_ssl>
 
